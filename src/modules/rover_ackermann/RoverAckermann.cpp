@@ -55,10 +55,6 @@ void RoverAckermann::updateParams()
 
 void RoverAckermann::Run()
 {
-	hrt_abstime timestamp_prev = _timestamp;
-	_timestamp = hrt_absolute_time();
-	_dt = math::constrain(_timestamp - timestamp_prev, 1_ms, 5000_ms) * 1e-6f;
-
 	if (_parameter_update_sub.updated()) {
 		parameter_update_s param_update{};
 		_parameter_update_sub.copy(&param_update);
@@ -88,6 +84,7 @@ void RoverAckermann::Run()
 		vehicle_status_s vehicle_status{};
 		_vehicle_status_sub.copy(&vehicle_status);
 
+		// Reset all controllers if the navigation state changes
 		if (vehicle_status.nav_state != _nav_state) {
 			_ackermann_pos_control.reset();
 			_ackermann_vel_control.reset();
@@ -99,7 +96,7 @@ void RoverAckermann::Run()
 	}
 
 	// Generate setpoints
-	bool actuator_control_enabled{true};
+	bool flag_control_actuators_enabled{true};
 
 	if (_vehicle_control_mode.flag_control_manual_enabled) {
 		manualControl(_nav_state);
@@ -108,27 +105,21 @@ void RoverAckermann::Run()
 		_ackermann_pos_control.autoPositionMode();
 
 	} else if (_vehicle_control_mode.flag_control_offboard_enabled) {
-		actuator_control_enabled = offboardControl();
+		flag_control_actuators_enabled = offboardControl();
 	}
 
 	// Run controllers
 	if (_vehicle_control_mode.flag_armed && _sanity_checks_passed) {
-		updateControllers(actuator_control_enabled);
+		updateControllers(flag_control_actuators_enabled);
+		_was_armed = true;
 
-	} else { // Reset all controllers and stop motors
+	} else if (_was_armed) { // Reset all controllers and stop the vehicle
 		_ackermann_pos_control.reset();
 		_ackermann_vel_control.reset();
 		_ackermann_att_control.reset();
 		_ackermann_rate_control.reset();
-		actuator_motors_s actuator_motors{};
-		actuator_motors.reversible_flags = _param_r_rev.get();
-		actuator_motors.control[0] = 0.f;
-		actuator_motors.timestamp = _timestamp;
-		_actuator_motors_pub.publish(actuator_motors);
-		actuator_servos_s actuator_servos{};
-		actuator_servos.control[0] = 0.f;
-		actuator_servos.timestamp = _timestamp;
-		_actuator_servos_pub.publish(actuator_servos);
+		_ackermann_act_control.stopVehicle();
+		_was_armed = false;
 	}
 
 }
@@ -137,15 +128,15 @@ void RoverAckermann::manualControl(const int nav_state)
 {
 	switch (nav_state) {
 	case vehicle_status_s::NAVIGATION_STATE_MANUAL:
-		_ackermann_act_control.manualMode();
+		_ackermann_act_control.manualManualMode();
 		break;
 
 	case vehicle_status_s::NAVIGATION_STATE_ACRO:
-		_ackermann_rate_control.acroMode();
+		_ackermann_rate_control.manualAcroMode();
 		break;
 
 	case vehicle_status_s::NAVIGATION_STATE_STAB:
-		_ackermann_att_control.stabMode();
+		_ackermann_att_control.manualStabMode();
 		break;
 
 	case vehicle_status_s::NAVIGATION_STATE_POSCTL:
@@ -164,7 +155,7 @@ bool RoverAckermann::offboardControl()
 
 	if (offboard_control_mode.position) {
 		rover_position_setpoint_s rover_position_setpoint{};
-		rover_position_setpoint.timestamp = _timestamp;
+		rover_position_setpoint.timestamp = hrt_absolute_time();
 		rover_position_setpoint.position_ned[0] = trajectory_setpoint.position[0];
 		rover_position_setpoint.position_ned[1] = trajectory_setpoint.position[1];
 		rover_position_setpoint.start_ned[0] = NAN;
@@ -177,7 +168,7 @@ bool RoverAckermann::offboardControl()
 	} else if (offboard_control_mode.velocity) {
 		const Vector2f velocity_ned(trajectory_setpoint.velocity[0], trajectory_setpoint.velocity[1]);
 		rover_velocity_setpoint_s rover_velocity_setpoint{};
-		rover_velocity_setpoint.timestamp = _timestamp;
+		rover_velocity_setpoint.timestamp = hrt_absolute_time();
 		rover_velocity_setpoint.speed = velocity_ned.norm();
 		rover_velocity_setpoint.bearing = atan2f(velocity_ned(1), velocity_ned(0));
 		_rover_velocity_setpoint_pub.publish(rover_velocity_setpoint);
@@ -187,7 +178,7 @@ bool RoverAckermann::offboardControl()
 	return !offboard_control_mode.direct_actuator;
 }
 
-void RoverAckermann::updateControllers(const bool actuator_control_enabled)
+void RoverAckermann::updateControllers(const bool flag_control_actuators_enabled)
 {
 	if (_vehicle_control_mode.flag_control_position_enabled) {
 		_ackermann_pos_control.updatePosControl();
@@ -205,7 +196,7 @@ void RoverAckermann::updateControllers(const bool actuator_control_enabled)
 		_ackermann_rate_control.updateRateControl();
 	}
 
-	if (actuator_control_enabled) {
+	if (flag_control_actuators_enabled) {
 		_ackermann_act_control.updateActControl();
 	}
 }
